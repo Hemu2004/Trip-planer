@@ -1,0 +1,7 @@
+{
+  "name": "Trip Planner",
+  "description": "An AI-powered travel planning application to effortlessly organize itineraries, budgets, places, and stays.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
