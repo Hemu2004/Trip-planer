@@ -1,0 +1,104 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 1. Global Default Deny Catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Reusable Security Helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_-]+$');
+    }
+
+    function isAdmin() {
+      return isSignedIn() &&
+             request.auth.token.email != null &&
+             request.auth.token.email.lower() == 'hemanthkuamr17@gmail.com';
+    }
+
+    // User Profile Validation
+    function isValidUserProfile(data) {
+      return data.id is string && data.id.size() <= 128 &&
+             data.email is string && data.email.size() <= 256 &&
+             data.displayName is string && data.displayName.size() <= 200 &&
+             (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() <= 2048)) &&
+             (!('createdAt' in data) || (data.createdAt is string && data.createdAt.size() <= 64)) &&
+             (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 64));
+    }
+
+    // Trip Plan Validation
+    function isValidTrip(data) {
+      return data.id is string && data.id.size() <= 128 &&
+             data.userId is string && data.userId.size() <= 128 &&
+             data.title is string && data.title.size() > 0 && data.title.size() <= 200 &&
+             data.destination is string && data.destination.size() > 0 && data.destination.size() <= 200 &&
+             (!('startingLocation' in data) || (data.startingLocation is string && data.startingLocation.size() <= 200)) &&
+             data.durationDays is number && data.durationDays > 0 && data.durationDays <= 365 &&
+             data.travelers is number && data.travelers > 0 && data.travelers <= 100 &&
+             data.createdAt is string && data.createdAt.size() <= 64 &&
+             (!('summary' in data) || (data.summary is string && data.summary.size() <= 5000));
+    }
+
+    // Contact Message Validation
+    function isValidContactMessage(data) {
+      return data.id is string && data.id.size() <= 128 &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
+             data.email is string && data.email.size() > 0 && data.email.size() <= 256 &&
+             data.message is string && data.message.size() > 0 && data.message.size() <= 4000 &&
+             (!('subject' in data) || (data.subject is string && data.subject.size() <= 200)) &&
+             (!('status' in data) || (data.status is string && data.status.size() <= 50)) &&
+             (!('recipient' in data) || (data.recipient is string && data.recipient.size() <= 256)) &&
+             data.createdAt is string && data.createdAt.size() <= 64;
+    }
+
+    // Boot connection validation test doc
+    match /test/connection {
+      allow get: if true;
+    }
+
+    // User Profile: owner access + admin support access
+    match /users/{userId} {
+      allow get: if (isSignedIn() && request.auth.uid == userId && isValidId(userId)) || isAdmin();
+      allow list: if isAdmin();
+      allow create: if isSignedIn() && request.auth.uid == userId && isValidId(userId) &&
+                       isValidUserProfile(incoming()) && incoming().id == userId;
+      allow update: if (isSignedIn() && request.auth.uid == userId && isValidId(userId) &&
+                       isValidUserProfile(incoming()) && incoming().id == userId &&
+                       (!('createdAt' in existing()) || incoming().createdAt == existing().createdAt)) || isAdmin();
+      allow delete: if (isSignedIn() && request.auth.uid == userId && isValidId(userId)) || isAdmin();
+
+      // User Trips Subcollection
+      match /trips/{tripId} {
+        allow get: if (isSignedIn() && request.auth.uid == userId && isValidId(tripId)) || isAdmin();
+        allow list: if (isSignedIn() && request.auth.uid == userId) || isAdmin();
+        allow create: if isSignedIn() && request.auth.uid == userId && isValidId(tripId) &&
+                         isValidTrip(incoming()) && incoming().userId == userId;
+        allow update: if isSignedIn() && request.auth.uid == userId && isValidId(tripId) &&
+                         isValidTrip(incoming()) && incoming().userId == userId &&
+                         (!('createdAt' in existing()) || incoming().createdAt == existing().createdAt);
+        allow delete: if (isSignedIn() && request.auth.uid == userId && isValidId(tripId)) || isAdmin();
+      }
+    }
+
+    // Contact Messages: Public write drop box, readable & manageable by admin
+    match /contactMessages/{messageId} {
+      allow create: if isValidId(messageId) && isValidContactMessage(incoming());
+      allow read, update, delete: if isAdmin();
+    }
+  }
+}

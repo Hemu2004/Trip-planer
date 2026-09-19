@@ -1,5 +1,6 @@
 import React from 'react';
 import { NavigationPage } from '../types';
+import { useAuth } from '../context/AuthContext';
 import { Compass, Sparkles, Heart, Shield, Globe, MapPin } from 'lucide-react';
 
 interface FooterProps {
@@ -7,6 +8,7 @@ interface FooterProps {
 }
 
 export const Footer: React.FC<FooterProps> = ({ onNavigate }) => {
+  const { isAdmin } = useAuth();
   return (
     <footer className="bg-slate-900 text-slate-300 border-t border-slate-800">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-14">
@@ -58,6 +60,16 @@ export const Footer: React.FC<FooterProps> = ({ onNavigate }) => {
                   AI Trip Planner
                 </button>
               </li>
+              {isAdmin && (
+                <li>
+                  <button
+                    onClick={() => onNavigate('knowledge-base')}
+                    className="hover:text-sky-400 transition-colors cursor-pointer"
+                  >
+                    Knowledge Base (RAG)
+                  </button>
+                </li>
+              )}
               <li>
                 <button
                   onClick={() => onNavigate('contact')}

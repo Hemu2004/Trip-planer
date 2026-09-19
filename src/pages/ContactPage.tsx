@@ -1,14 +1,27 @@
-import React, { useState } from 'react';
-import { Mail, MessageSquare, Send, CheckCircle2, Phone, MapPin, Clock, HelpCircle } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Mail, MessageSquare, Send, CheckCircle2, ShieldCheck, MapPin, Clock, HelpCircle, User } from 'lucide-react';
 import { ContactFormData } from '../types';
+import { saveContactMessageToFirestore } from '../firebase';
+import { useAuth } from '../context/AuthContext';
 
 export const ContactPage: React.FC = () => {
+  const { user } = useAuth();
   const [formData, setFormData] = useState<ContactFormData>({
-    name: '',
-    email: '',
+    name: user?.name || '',
+    email: user?.email || '',
     subject: '',
     message: '',
   });
+
+  useEffect(() => {
+    if (user) {
+      setFormData((prev) => ({
+        ...prev,
+        name: prev.name || user.name || '',
+        email: prev.email || user.email || '',
+      }));
+    }
+  }, [user]);
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submittedMessage, setSubmittedMessage] = useState<string | null>(null);
@@ -25,6 +38,13 @@ export const ContactPage: React.FC = () => {
     setErrorMessage(null);
 
     try {
+      // Persist contact message in Firestore under /contactMessages
+      try {
+        await saveContactMessageToFirestore(formData);
+      } catch (fsErr) {
+        console.warn('Firestore message save note:', fsErr);
+      }
+
       const response = await fetch('/api/contact', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -33,8 +53,15 @@ export const ContactPage: React.FC = () => {
 
       const data = await response.json();
       if (response.ok && data.success) {
-        setSubmittedMessage(data.message || 'Thank you! We will get back to you shortly.');
-        setFormData({ name: '', email: '', subject: '', message: '' });
+        setSubmittedMessage(
+          data.message || 'Your inquiry has been routed directly to our Administrator and Support Desk. We will reply shortly!'
+        );
+        setFormData({
+          name: user?.name || '',
+          email: user?.email || '',
+          subject: '',
+          message: '',
+        });
       } else {
         setErrorMessage(data.error || 'Failed to submit your message. Please try again.');
       }
@@ -51,14 +78,14 @@ export const ContactPage: React.FC = () => {
       <div className="text-center space-y-3 max-w-2xl mx-auto">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-sky-100 text-sky-800 text-xs font-bold uppercase tracking-wider">
           <Mail className="w-3.5 h-3.5" />
-          <span>Get in Touch</span>
+          <span>Official Support Desk</span>
         </div>
         <h1 className="text-3xl sm:text-4xl font-extrabold text-slate-900 tracking-tight">
-          We'd love to hear from you
+          How can our team help you?
         </h1>
         <p className="text-slate-600 text-sm sm:text-base leading-relaxed">
-          Have feedback on an AI itinerary? Interested in future partnership opportunities for hotels or rental fleets?
-          Drop our team a note below.
+          Have questions about your itinerary, feedback on generated trips, or need personalized travel assistance?
+          Submit a message directly to our dedicated support desk and administration.
         </p>
       </div>
 
@@ -66,18 +93,18 @@ export const ContactPage: React.FC = () => {
         {/* Left Side: Contact Information & Details */}
         <div className="lg:col-span-5 space-y-6">
           <div className="bg-white rounded-3xl p-6 sm:p-8 border border-slate-200/90 shadow-sm space-y-6">
-            <h3 className="text-lg font-bold text-slate-900">Contact Details</h3>
+            <h3 className="text-lg font-bold text-slate-900">Support Desk Channels</h3>
 
             <div className="space-y-4 text-xs sm:text-sm text-slate-600">
               <div className="flex items-start gap-3.5">
                 <div className="w-9 h-9 rounded-xl bg-sky-100 text-sky-700 flex items-center justify-center shrink-0 mt-0.5">
-                  <Mail className="w-4 h-4" />
+                  <ShieldCheck className="w-4 h-4" />
                 </div>
                 <div>
-                  <span className="font-bold text-slate-900 block text-xs">Support Email</span>
-                  <a href="mailto:support@tripplanner.app" className="text-sky-600 hover:underline">
-                    support@tripplanner.app
-                  </a>
+                  <span className="font-bold text-slate-900 block text-xs">Direct Support Desk</span>
+                  <p className="text-slate-500 text-xs mt-0.5">
+                    Submissions are routed directly to the lead administrator and support team mailbox.
+                  </p>
                 </div>
               </div>
 
@@ -86,8 +113,8 @@ export const ContactPage: React.FC = () => {
                   <Clock className="w-4 h-4" />
                 </div>
                 <div>
-                  <span className="font-bold text-slate-900 block text-xs">Response Time</span>
-                  <p className="text-slate-500 text-xs mt-0.5">Within 24 business hours (Monday – Friday)</p>
+                  <span className="font-bold text-slate-900 block text-xs">Response Commitment</span>
+                  <p className="text-slate-500 text-xs mt-0.5">Prompt response to your email address within 24 hours.</p>
                 </div>
               </div>
 
@@ -96,17 +123,16 @@ export const ContactPage: React.FC = () => {
                   <MapPin className="w-4 h-4" />
                 </div>
                 <div>
-                  <span className="font-bold text-slate-900 block text-xs">Headquarters</span>
-                  <p className="text-slate-500 text-xs mt-0.5">San Francisco, CA & Global Remote Team</p>
+                  <span className="font-bold text-slate-900 block text-xs">Global Coverage</span>
+                  <p className="text-slate-500 text-xs mt-0.5">Supporting worldwide itineraries and holiday schedules.</p>
                 </div>
               </div>
             </div>
 
             <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100 text-xs text-slate-500 space-y-1">
-              <span className="font-bold text-slate-700">Trip Planner V1 Notice:</span>
+              <span className="font-bold text-slate-700">Privacy & Security:</span>
               <p>
-                We do not process credit cards or commercial hotel transactions in Version 1. For booking inquiries, our
-                concierge is happy to provide neighborhood recommendations.
+                Your personal email and inquiries are kept strictly confidential and accessed only by our administrator to resolve your requests.
               </p>
             </div>
           </div>
@@ -121,13 +147,13 @@ export const ContactPage: React.FC = () => {
               <div>
                 <p className="font-bold text-slate-800">Is Trip Planner free to use?</p>
                 <p className="text-slate-500 mt-0.5">
-                  Yes, Version 1 core AI trip planning, budget estimation, and itinerary generation are completely free.
+                  Yes, core AI trip planning, budget estimation, and itinerary generation are completely free.
                 </p>
               </div>
               <div>
                 <p className="font-bold text-slate-800">Can I export my plan?</p>
                 <p className="text-slate-500 mt-0.5">
-                  Yes, you can save your itinerary to your account or use the print/export option for offline access.
+                  Yes, you can save your itinerary to your account or sync events directly to Google Calendar.
                 </p>
               </div>
             </div>
@@ -138,8 +164,8 @@ export const ContactPage: React.FC = () => {
         <div className="lg:col-span-7">
           <div className="bg-white rounded-3xl p-8 sm:p-10 border border-slate-200/90 shadow-xl space-y-6">
             <div className="space-y-1">
-              <h2 className="text-2xl font-extrabold text-slate-900">Send us a message</h2>
-              <p className="text-xs text-slate-500">Fill in the details below and our team will get back to you.</p>
+              <h2 className="text-2xl font-extrabold text-slate-900">Send a message to Support</h2>
+              <p className="text-xs text-slate-500">Fill in the details below and our administrator will respond to your email.</p>
             </div>
 
             {submittedMessage && (
@@ -177,7 +203,7 @@ export const ContactPage: React.FC = () => {
 
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Email Address <span className="text-red-500">*</span>
+                    Your Email Address <span className="text-red-500">*</span>
                   </label>
                   <input
                     id="contact-email-input"
@@ -192,11 +218,11 @@ export const ContactPage: React.FC = () => {
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">Subject / Topic</label>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Subject / Inquiry Type</label>
                 <input
                   id="contact-subject-input"
                   type="text"
-                  placeholder="e.g., Destination Recommendation, Bug Report, Partner Inquiry"
+                  placeholder="e.g. Itinerary Question, Google Calendar Sync, Feedback"
                   value={formData.subject}
                   onChange={(e) => setFormData({ ...formData, subject: e.target.value })}
                   className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-xs font-medium text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500"
@@ -211,7 +237,7 @@ export const ContactPage: React.FC = () => {
                   id="contact-message-input"
                   rows={5}
                   required
-                  placeholder="Tell us what you're thinking or how we can help your holiday planning..."
+                  placeholder="Tell us what you're thinking or how we can assist your travel journey..."
                   value={formData.message}
                   onChange={(e) => setFormData({ ...formData, message: e.target.value })}
                   className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-xs font-medium text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500"
@@ -225,7 +251,7 @@ export const ContactPage: React.FC = () => {
                 className="w-full sm:w-auto px-8 py-3.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs shadow-md transition-all cursor-pointer flex items-center justify-center gap-2 disabled:opacity-50"
               >
                 <Send className="w-4 h-4" />
-                <span>{isSubmitting ? 'Sending Message...' : 'Send Message'}</span>
+                <span>{isSubmitting ? 'Routing to Support...' : 'Submit Support Request'}</span>
               </button>
             </form>
           </div>

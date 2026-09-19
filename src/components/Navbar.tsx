@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { NavigationPage } from '../types';
 import { useAuth } from '../context/AuthContext';
-import { Compass, Menu, X, Sparkles, User, LogOut, ChevronDown, MapPin } from 'lucide-react';
+import { Compass, Menu, X, Sparkles, User, LogOut, ChevronDown, MapPin, Calendar, ExternalLink, Shield, Database } from 'lucide-react';
 
 interface NavbarProps {
   currentPage: NavigationPage;
@@ -9,7 +9,7 @@ interface NavbarProps {
 }
 
 export const Navbar: React.FC<NavbarProps> = ({ currentPage, onNavigate }) => {
-  const { user, isAuthenticated, logout } = useAuth();
+  const { user, isAuthenticated, isAdmin, logout } = useAuth();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [profileDropdownOpen, setProfileDropdownOpen] = useState(false);
 
@@ -21,10 +21,15 @@ export const Navbar: React.FC<NavbarProps> = ({ currentPage, onNavigate }) => {
 
   const navLinks: { id: NavigationPage; label: string; highlight?: boolean }[] = [
     { id: 'home', label: 'Home' },
-    { id: 'about', label: 'About' },
-    { id: 'planner', label: 'AI Trip Planner', highlight: true },
-    { id: 'contact', label: 'Contact' },
+    { id: 'explore', label: 'Explore' },
+    { id: 'planner', label: 'AI Planner', highlight: true },
+    { id: 'my-trips', label: 'My Trips' },
   ];
+
+  if (isAdmin) {
+    navLinks.push({ id: 'knowledge-base', label: 'Knowledge Base' });
+    navLinks.push({ id: 'admin', label: 'Admin' });
+  }
 
   return (
     <header className="sticky top-0 z-50 bg-white/95 backdrop-blur-md border-b border-slate-200/80 transition-all">
@@ -93,21 +98,62 @@ export const Navbar: React.FC<NavbarProps> = ({ currentPage, onNavigate }) => {
                 {profileDropdownOpen && (
                   <div className="absolute right-0 mt-2 w-64 bg-white rounded-2xl shadow-xl border border-slate-100 py-2.5 z-50 animate-in fade-in slide-in-from-top-2 duration-150">
                     <div className="px-4 py-2 border-b border-slate-100">
-                      <p className="text-xs font-semibold text-slate-900">{user.name}</p>
+                      <div className="flex items-center justify-between">
+                        <p className="text-xs font-semibold text-slate-900">{user.name}</p>
+                        {isAdmin && (
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-indigo-100 text-indigo-800 uppercase tracking-wide">
+                            Super Admin
+                          </span>
+                        )}
+                      </div>
                       <p className="text-xs text-slate-500 truncate">{user.email}</p>
                       <div className="mt-1.5 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-emerald-50 text-emerald-700 border border-emerald-100">
                         <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
-                        Google Authenticated
+                        {user.provider === 'google' ? 'Google Authenticated' : 'Verified Account'}
                       </div>
                     </div>
 
+                    {isAdmin && (
+                      <button
+                        onClick={() => handleNav('admin')}
+                        className="w-full text-left px-4 py-2 text-xs font-bold text-indigo-700 hover:bg-indigo-50 flex items-center gap-2.5 cursor-pointer"
+                      >
+                        <Shield className="w-4 h-4 text-indigo-600" />
+                        Admin Console
+                      </button>
+                    )}
+
                     <button
                       onClick={() => handleNav('planner')}
-                      className="w-full text-left px-4 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 flex items-center gap-2.5"
+                      className="w-full text-left px-4 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 flex items-center gap-2.5 cursor-pointer"
                     >
                       <Sparkles className="w-4 h-4 text-sky-600" />
                       Plan a New Trip
                     </button>
+
+                    {isAdmin && (
+                      <button
+                        onClick={() => handleNav('knowledge-base')}
+                        className="w-full text-left px-4 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 flex items-center gap-2.5 cursor-pointer"
+                      >
+                        <Database className="w-4 h-4 text-indigo-600" />
+                        Knowledge Base (RAG)
+                      </button>
+                    )}
+
+                    <a
+                      href="https://calendar.google.com/calendar/u/0/r"
+                      target="_blank"
+                      rel="noreferrer"
+                      onClick={() => setProfileDropdownOpen(false)}
+                      className="w-full text-left px-4 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 flex items-center justify-between group"
+                    >
+                      <span className="flex items-center gap-2.5">
+                        <Calendar className="w-4 h-4 text-emerald-600" />
+                        <span>Google Calendar</span>
+                      </span>
+                      <ExternalLink className="w-3 h-3 text-slate-400 group-hover:text-slate-600" />
+                    </a>
 
                     <div className="my-1 border-t border-slate-100"></div>
 

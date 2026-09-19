@@ -6,8 +6,12 @@ import {
   TripPacing,
   ChatMessage,
   NavigationPage,
+  MapLocationItem,
+  RouteInfo,
 } from '../types';
 import { TRAVEL_INTEREST_OPTIONS, POPULAR_DESTINATIONS } from '../data/sampleDestinations';
+import { CURATED_MAP_PLACES, DESTINATION_COORDINATES } from '../data/travelKnowledgeBase';
+import { InteractiveMap } from '../components/InteractiveMap';
 import { useAuth } from '../context/AuthContext';
 import {
   Sparkles,
@@ -32,15 +36,29 @@ import {
   BookmarkCheck,
   Zap,
   ArrowRight,
+  FolderHeart,
+  Trash2,
+  Loader2,
+  X,
+  Cloud,
 } from 'lucide-react';
+import {
+  saveTripToFirestore,
+  getUserTripsFromFirestore,
+  deleteTripFromFirestore,
+} from '../firebase';
+import { GoogleCalendarSyncModal } from '../components/GoogleCalendarSyncModal';
+import { GeminiChatbot } from '../components/GeminiChatbot';
 
 interface AITripPlannerPageProps {
   initialDestination?: string;
+  openSavedTrips?: boolean;
   onNavigate: (page: NavigationPage) => void;
 }
 
 export const AITripPlannerPage: React.FC<AITripPlannerPageProps> = ({
   initialDestination,
+  openSavedTrips,
   onNavigate,
 }) => {
   const { user, isAuthenticated } = useAuth();
@@ -64,8 +82,18 @@ export const AITripPlannerPage: React.FC<AITripPlannerPageProps> = ({
   const [isGenerating, setIsGenerating] = useState(false);
   const [generationStep, setGenerationStep] = useState(0);
   const [generatedPlan, setGeneratedPlan] = useState<TripPlan | null>(null);
-  const [activeTab, setActiveTab] = useState<'itinerary' | 'places' | 'budget' | 'tips' | 'upcoming'>('itinerary');
+  const [activeTab, setActiveTab] = useState<'itinerary' | 'map' | 'places' | 'budget' | 'tips' | 'upcoming' | 'chat'>('itinerary');
+  const [mapDayFilter, setMapDayFilter] = useState<number | undefined>(undefined);
+  const [selectedMapLocationId, setSelectedMapLocationId] = useState<string | undefined>(undefined);
+  const [weatherData, setWeatherData] = useState<any | null>(null);
+  const [activeRoute, setActiveRoute] = useState<RouteInfo | null>(null);
   const [savedSuccess, setSavedSuccess] = useState(false);
+  const [showSavedTripsModal, setShowSavedTripsModal] = useState(false);
+  const [savedTrips, setSavedTrips] = useState<TripPlan[]>([]);
+  const [isLoadingSavedTrips, setIsLoadingSavedTrips] = useState(false);
+  const [saveStatusMessage, setSaveStatusMessage] = useState<string | null>(null);
+  const [isSavingToFirestore, setIsSavingToFirestore] = useState(false);
+  const [showCalendarModal, setShowCalendarModal] = useState(false);
 
   // Chat refinement state
   const [chatOpen, setChatOpen] = useState(false);
@@ -80,6 +108,52 @@ export const AITripPlannerPage: React.FC<AITripPlannerPageProps> = ({
       setDestination(initialDestination);
     }
   }, [initialDestination]);
+
+  // Open saved trips modal if routed to My Trips
+  useEffect(() => {
+    if (openSavedTrips) {
+      setShowSavedTripsModal(true);
+      loadSavedTrips();
+    }
+  }, [openSavedTrips]);
+
+  // Fetch weather and default route calculation when plan is generated
+  useEffect(() => {
+    if (generatedPlan?.destination) {
+      fetch(`/api/weather?destination=${encodeURIComponent(generatedPlan.destination)}`)
+        .then((r) => r.json())
+        .then((d) => {
+          if (d.weather) setWeatherData(d.weather);
+        })
+        .catch((err) => console.warn('Weather fetch error:', err));
+
+      fetch(`/api/routes?destination=${encodeURIComponent(generatedPlan.destination)}&origin=Hotel&mode=driving`)
+        .then((r) => r.json())
+        .then((d) => {
+          if (d.route) setActiveRoute(d.route);
+        })
+        .catch((err) => console.warn('Route fetch error:', err));
+    }
+  }, [generatedPlan?.destination]);
+
+  const getPlanLocations = (): MapLocationItem[] => {
+    if (!generatedPlan) return [];
+    if (generatedPlan.mapLocations && generatedPlan.mapLocations.length > 0) {
+      return generatedPlan.mapLocations;
+    }
+    const destKey = generatedPlan.destination.toLowerCase().split(',')[0].trim().replace(/\s+/g, '-');
+    return CURATED_MAP_PLACES[destKey] || CURATED_MAP_PLACES['bali'] || [];
+  };
+
+  const getPlanMapCenter = (): [number, number] => {
+    if (!generatedPlan) return [-8.5069, 115.2625];
+    const destKey = generatedPlan.destination.toLowerCase().split(',')[0].trim().replace(/\s+/g, '-');
+    const coord = DESTINATION_COORDINATES[destKey];
+    if (coord) {
+      return [coord.lat, coord.lng];
+    }
+    return [-8.5069, 115.2625];
+  };
 
   // Handle interest pill toggle
   const toggleInterest = (interest: string) => {
@@ -223,9 +297,65 @@ export const AITripPlannerPage: React.FC<AITripPlannerPageProps> = ({
     }
   }, [chatMessages, chatOpen]);
 
-  const handleSavePlan = () => {
-    setSavedSuccess(true);
-    setTimeout(() => setSavedSuccess(false), 3000);
+  const loadSavedTrips = async () => {
+    if (!user) return;
+    setIsLoadingSavedTrips(true);
+    try {
+      const trips = await getUserTripsFromFirestore(user.id);
+      setSavedTrips(trips);
+    } catch (err) {
+      console.error('Error loading trips from Firestore:', err);
+    } finally {
+      setIsLoadingSavedTrips(false);
+    }
+  };
+
+  const handleSavePlan = async () => {
+    if (!generatedPlan) return;
+    if (!user) {
+      setSaveStatusMessage('Please sign in to save your trip to your cloud account.');
+      setTimeout(() => setSaveStatusMessage(null), 4000);
+      return;
+    }
+
+    setIsSavingToFirestore(true);
+    try {
+      await saveTripToFirestore(user.id, generatedPlan);
+      setSavedSuccess(true);
+      setSaveStatusMessage('Itinerary saved to your Firebase cloud account!');
+      setTimeout(() => {
+        setSavedSuccess(false);
+        setSaveStatusMessage(null);
+      }, 4000);
+    } catch (err) {
+      console.error('Failed to save to Firestore:', err);
+      setSaveStatusMessage('Failed to save trip to Firestore. Check connection.');
+      setTimeout(() => setSaveStatusMessage(null), 4000);
+    } finally {
+      setIsSavingToFirestore(false);
+    }
+  };
+
+  const handleDeleteSavedTrip = async (tripId: string) => {
+    if (!user) return;
+    try {
+      await deleteTripFromFirestore(user.id, tripId);
+      setSavedTrips((prev) => prev.filter((t) => t.id !== tripId));
+    } catch (err) {
+      console.error('Failed to delete trip from Firestore:', err);
+    }
+  };
+
+  const handleSelectSavedTrip = (trip: TripPlan) => {
+    setGeneratedPlan(trip);
+    setDestination(trip.destination);
+    setStartingLocation(trip.startingLocation || '');
+    setStartDate(trip.startDate);
+    setEndDate(trip.endDate);
+    setTravelers(trip.travelers);
+    setPacing(trip.pacing);
+    setBudgetTier(trip.budgetTier);
+    setShowSavedTripsModal(false);
   };
 
   const handlePrint = () => {
@@ -250,32 +380,54 @@ export const AITripPlannerPage: React.FC<AITripPlannerPageProps> = ({
             </p>
           </div>
 
-          {generatedPlan && (
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => setChatOpen(!chatOpen)}
-                className={`px-4 py-2 rounded-xl text-xs font-bold border transition-all cursor-pointer flex items-center gap-2 ${
-                  chatOpen
-                    ? 'bg-sky-600 text-white border-sky-600 shadow-sm'
-                    : 'bg-white text-slate-800 border-slate-300 hover:bg-slate-50'
-                }`}
-              >
-                <MessageSquare className="w-4 h-4" />
-                <span>{chatOpen ? 'Hide AI Chat' : 'Refine with AI Chat'}</span>
-              </button>
+          <div className="flex items-center gap-2">
+            {/* Always visible Saved Trips button */}
+            <button
+              id="open-saved-trips-btn"
+              onClick={() => {
+                setShowSavedTripsModal(true);
+                if (user) loadSavedTrips();
+              }}
+              className="px-3.5 py-2 rounded-xl text-xs font-bold border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 transition-all cursor-pointer flex items-center gap-2 shadow-xs"
+              title="View your saved itineraries stored in Firebase"
+            >
+              <FolderHeart className="w-4 h-4 text-rose-500" />
+              <span>Saved Trips</span>
+              {user && (
+                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-100 text-emerald-800">
+                  <Cloud className="w-3 h-3" />
+                  Cloud
+                </span>
+              )}
+            </button>
 
-              <button
-                onClick={() => {
-                  setGeneratedPlan(null);
-                  window.scrollTo({ top: 0, behavior: 'smooth' });
-                }}
-                className="px-3 py-2 rounded-xl text-xs font-bold text-slate-600 bg-white border border-slate-200 hover:bg-slate-50 transition-colors cursor-pointer flex items-center gap-1.5"
-              >
-                <RotateCcw className="w-3.5 h-3.5" />
-                <span>New Plan</span>
-              </button>
-            </div>
-          )}
+            {generatedPlan && (
+              <>
+                <button
+                  onClick={() => setChatOpen(!chatOpen)}
+                  className={`px-4 py-2 rounded-xl text-xs font-bold border transition-all cursor-pointer flex items-center gap-2 ${
+                    chatOpen
+                      ? 'bg-sky-600 text-white border-sky-600 shadow-sm'
+                      : 'bg-white text-slate-800 border-slate-300 hover:bg-slate-50'
+                  }`}
+                >
+                  <MessageSquare className="w-4 h-4" />
+                  <span>{chatOpen ? 'Hide AI Chat' : 'Refine with AI Chat'}</span>
+                </button>
+
+                <button
+                  onClick={() => {
+                    setGeneratedPlan(null);
+                    window.scrollTo({ top: 0, behavior: 'smooth' });
+                  }}
+                  className="px-3 py-2 rounded-xl text-xs font-bold text-slate-600 bg-white border border-slate-200 hover:bg-slate-50 transition-colors cursor-pointer flex items-center gap-1.5"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>New Plan</span>
+                </button>
+              </>
+            )}
+          </div>
         </div>
       </div>
 
@@ -538,6 +690,13 @@ export const AITripPlannerPage: React.FC<AITripPlannerPageProps> = ({
                       <span className="px-3 py-1 rounded-full text-xs font-semibold bg-slate-100 text-slate-700 capitalize">
                         {generatedPlan.pacing} Pacing
                       </span>
+                      {weatherData && (
+                        <span className="px-3 py-1 rounded-full text-xs font-bold bg-amber-100 text-amber-900 flex items-center gap-1.5 shadow-2xs">
+                          <span>☀️ {weatherData.temperatureC}°C ({weatherData.temperatureF}°F)</span>
+                          <span>•</span>
+                          <span>{weatherData.condition}</span>
+                        </span>
+                      )}
                     </div>
 
                     <h2 className="text-2xl sm:text-3xl font-extrabold text-slate-900 tracking-tight">
@@ -553,11 +712,32 @@ export const AITripPlannerPage: React.FC<AITripPlannerPageProps> = ({
                     <button
                       id="save-trip-plan-btn"
                       onClick={handleSavePlan}
-                      className="p-2.5 rounded-xl border border-slate-200 text-slate-700 hover:bg-slate-50 transition-colors cursor-pointer flex items-center gap-1.5 text-xs font-semibold"
-                      title="Save Itinerary"
+                      disabled={isSavingToFirestore}
+                      className={`p-2.5 px-3.5 rounded-xl border transition-all cursor-pointer flex items-center gap-1.5 text-xs font-semibold ${
+                        savedSuccess
+                          ? 'border-emerald-300 bg-emerald-50 text-emerald-800'
+                          : 'border-slate-200 text-slate-700 hover:bg-slate-50'
+                      }`}
+                      title="Save Itinerary to Firebase Firestore"
                     >
-                      <BookmarkCheck className={`w-4 h-4 ${savedSuccess ? 'text-emerald-600' : 'text-slate-500'}`} />
-                      <span>{savedSuccess ? 'Saved!' : 'Save'}</span>
+                      {isSavingToFirestore ? (
+                        <Loader2 className="w-4 h-4 animate-spin text-sky-600" />
+                      ) : (
+                        <BookmarkCheck className={`w-4 h-4 ${savedSuccess ? 'text-emerald-600' : 'text-slate-500'}`} />
+                      )}
+                      <span>
+                        {isSavingToFirestore ? 'Saving...' : savedSuccess ? 'Saved to Cloud!' : 'Save Itinerary'}
+                      </span>
+                    </button>
+
+                    <button
+                      id="google-calendar-sync-btn"
+                      onClick={() => setShowCalendarModal(true)}
+                      className="p-2.5 px-3.5 rounded-xl border border-sky-200 bg-sky-50 hover:bg-sky-100 text-sky-800 transition-all cursor-pointer flex items-center gap-1.5 text-xs font-semibold shadow-2xs"
+                      title="Sync Itinerary to Google Calendar"
+                    >
+                      <Calendar className="w-4 h-4 text-sky-600" />
+                      <span>Google Calendar</span>
                     </button>
 
                     <button
@@ -569,6 +749,20 @@ export const AITripPlannerPage: React.FC<AITripPlannerPageProps> = ({
                     </button>
                   </div>
                 </div>
+
+                {/* Save Feedback Banner */}
+                {saveStatusMessage && (
+                  <div
+                    className={`p-3 rounded-xl text-xs font-medium flex items-center gap-2 ${
+                      savedSuccess
+                        ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                        : 'bg-amber-50 text-amber-800 border border-amber-200'
+                    }`}
+                  >
+                    <Cloud className="w-4 h-4 shrink-0" />
+                    <span>{saveStatusMessage}</span>
+                  </div>
+                )}
 
                 {/* Sub-Navigation Tabs */}
                 <div className="flex items-center gap-2 overflow-x-auto border-b border-slate-100 pb-2">
@@ -585,6 +779,18 @@ export const AITripPlannerPage: React.FC<AITripPlannerPageProps> = ({
                   </button>
 
                   <button
+                    onClick={() => setActiveTab('map')}
+                    className={`px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap flex items-center gap-1.5 ${
+                      activeTab === 'map'
+                        ? 'bg-sky-600 text-white shadow-xs'
+                        : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+                    }`}
+                  >
+                    <MapPin className="w-3.5 h-3.5" />
+                    Interactive Map & Routes ({getPlanLocations().length})
+                  </button>
+
+                  <button
                     onClick={() => setActiveTab('places')}
                     className={`px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap flex items-center gap-1.5 ${
                       activeTab === 'places'
@@ -592,7 +798,7 @@ export const AITripPlannerPage: React.FC<AITripPlannerPageProps> = ({
                         : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
                     }`}
                   >
-                    <MapPin className="w-3.5 h-3.5" />
+                    <Compass className="w-3.5 h-3.5" />
                     Suggested Places & Sights
                   </button>
 
@@ -631,12 +837,52 @@ export const AITripPlannerPage: React.FC<AITripPlannerPageProps> = ({
                     <Building2 className="w-3.5 h-3.5" />
                     Stays & Rentals Preview
                   </button>
+
+                  <button
+                    id="tab-gemini-concierge-btn"
+                    onClick={() => setActiveTab('chat')}
+                    className={`px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap flex items-center gap-1.5 ${
+                      activeTab === 'chat'
+                        ? 'bg-gradient-to-r from-sky-600 via-indigo-600 to-amber-500 text-white shadow-xs'
+                        : 'text-sky-700 bg-sky-50/70 hover:bg-sky-100 hover:text-sky-900'
+                    }`}
+                  >
+                    <Sparkles className="w-3.5 h-3.5 text-amber-300" />
+                    Gemini AI Concierge & Search Grounding
+                  </button>
                 </div>
               </div>
 
               {/* TAB CONTENT 1: DAY-BY-DAY ITINERARY */}
               {activeTab === 'itinerary' && (
                 <div className="space-y-6">
+                  {/* Google Calendar Quick Sync Banner */}
+                  <div className="p-4 rounded-2xl bg-gradient-to-r from-sky-50 via-indigo-50/50 to-white border border-sky-100/90 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-2xs">
+                    <div className="flex items-center gap-3">
+                      <div className="w-9 h-9 rounded-xl bg-sky-600 text-white flex items-center justify-center shrink-0 shadow-xs">
+                        <Calendar className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <h4 className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
+                          <span>Google Calendar Integration</span>
+                          <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-100/80 px-2 py-0.5 rounded-full">
+                            Active
+                          </span>
+                        </h4>
+                        <p className="text-[11px] text-slate-500">
+                          Export all daily morning, afternoon, and evening slots directly to your personal Google Calendar.
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setShowCalendarModal(true)}
+                      className="px-3.5 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-bold transition-all shadow-2xs cursor-pointer flex items-center justify-center gap-1.5 shrink-0"
+                    >
+                      <Calendar className="w-3.5 h-3.5" />
+                      <span>Sync Schedule</span>
+                    </button>
+                  </div>
                   {generatedPlan.itinerary.map((dayPlan) => (
                     <div
                       key={dayPlan.day}
@@ -649,9 +895,22 @@ export const AITripPlannerPage: React.FC<AITripPlannerPageProps> = ({
                           </span>
                           <h3 className="text-base sm:text-lg font-bold text-slate-900">{dayPlan.theme}</h3>
                         </div>
-                        <span className="text-xs font-bold text-slate-500">
-                          Est. Day Budget: ~${dayPlan.estimatedDayCost}
-                        </span>
+                        <div className="flex items-center gap-3">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setMapDayFilter(dayPlan.day);
+                              setActiveTab('map');
+                            }}
+                            className="px-2.5 py-1 rounded-lg bg-sky-50 hover:bg-sky-100 text-sky-700 font-bold text-xs transition-colors flex items-center gap-1 cursor-pointer"
+                          >
+                            <MapPin className="w-3 h-3 text-sky-600" />
+                            <span>Map Day {dayPlan.day}</span>
+                          </button>
+                          <span className="text-xs font-bold text-slate-500">
+                            Est. Day Budget: ~${dayPlan.estimatedDayCost}
+                          </span>
+                        </div>
                       </div>
 
                       {/* Time Slots: Morning, Afternoon, Evening */}
@@ -715,6 +974,88 @@ export const AITripPlannerPage: React.FC<AITripPlannerPageProps> = ({
                       </div>
                     </div>
                   ))}
+                </div>
+              )}
+
+              {/* TAB CONTENT: INTERACTIVE MAP & ROUTE OVERVIEW */}
+              {activeTab === 'map' && (
+                <div className="space-y-6">
+                  {/* Map Header & Controls Bar */}
+                  <div className="bg-white rounded-3xl p-5 border border-slate-200/90 shadow-2xs space-y-4">
+                    <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                      <div>
+                        <h3 className="text-lg font-extrabold text-slate-900 flex items-center gap-2">
+                          <MapPin className="w-5 h-5 text-sky-600" />
+                          <span>Interactive Vacation & Route Map</span>
+                        </h3>
+                        <p className="text-xs text-slate-500 mt-0.5">
+                          Explore beaches, luxury stays, cultural monuments, and calculate turn-by-turn routes in {generatedPlan.destination}.
+                        </p>
+                      </div>
+
+                      {/* Day Filter Pill Bar */}
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <button
+                          onClick={() => setMapDayFilter(undefined)}
+                          className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                            mapDayFilter === undefined
+                              ? 'bg-slate-900 text-white shadow-2xs'
+                              : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                          }`}
+                        >
+                          All Days
+                        </button>
+                        {generatedPlan.itinerary.map((d) => (
+                          <button
+                            key={d.day}
+                            onClick={() => setMapDayFilter(d.day)}
+                            className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                              mapDayFilter === d.day
+                                ? 'bg-sky-600 text-white shadow-2xs'
+                                : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                            }`}
+                          >
+                            Day {d.day}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Route Details Card if available */}
+                    {activeRoute && (
+                      <div className="p-3.5 bg-sky-50/70 border border-sky-100 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+                        <div className="flex items-center gap-3">
+                          <div className="w-8 h-8 rounded-xl bg-sky-600 text-white flex items-center justify-center shrink-0">
+                            <Compass className="w-4 h-4" />
+                          </div>
+                          <div>
+                            <div className="font-bold text-slate-900">
+                              Scenic Route: {activeRoute.origin} → {activeRoute.destination}
+                            </div>
+                            <div className="text-slate-500 text-[11px]">
+                              {activeRoute.distanceKm} km • ~{activeRoute.durationMinutes} mins driving • {activeRoute.summary}
+                            </div>
+                          </div>
+                        </div>
+                        <span className="text-[11px] font-bold text-sky-800 bg-sky-100 px-2.5 py-1 rounded-full whitespace-nowrap self-start sm:self-auto">
+                          🚗 Optimized Route
+                        </span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Interactive Map Component */}
+                  <InteractiveMap
+                    locations={getPlanLocations()}
+                    center={getPlanMapCenter()}
+                    zoom={12}
+                    selectedLocationId={selectedMapLocationId}
+                    onSelectLocation={(loc) => setSelectedMapLocationId(loc.id)}
+                    activeRoute={activeRoute}
+                    dayNumberFilter={mapDayFilter}
+                    heightClass="h-[620px]"
+                    showCategoryFilters={true}
+                  />
                 </div>
               )}
 
@@ -957,6 +1298,19 @@ export const AITripPlannerPage: React.FC<AITripPlannerPageProps> = ({
                   </div>
                 </div>
               )}
+
+              {/* TAB CONTENT 7: GEMINI AI CONCIERGE & SEARCH GROUNDING */}
+              {activeTab === 'chat' && (
+                <div className="space-y-4">
+                  <div className="bg-white rounded-3xl p-6 border border-slate-200">
+                    <GeminiChatbot
+                      currentPlan={generatedPlan}
+                      destinationName={destination}
+                      isFloating={false}
+                    />
+                  </div>
+                </div>
+              )}
             </>
           )}
 
@@ -991,104 +1345,173 @@ export const AITripPlannerPage: React.FC<AITripPlannerPageProps> = ({
         </div>
       </div>
 
-      {/* CONVERSATIONAL AI CHAT DRAWER / FLOATING ASSISTANT */}
+      {/* FLOATING GEMINI CONCIERGE CHATBOT */}
       {generatedPlan && chatOpen && (
-        <div className="fixed bottom-6 right-6 z-50 w-96 max-w-[calc(100vw-3rem)] bg-white rounded-3xl shadow-2xl border border-slate-200 flex flex-col h-[520px] overflow-hidden animate-in slide-in-from-bottom-5 duration-200">
-          {/* Header */}
-          <div className="p-4 bg-gradient-to-r from-sky-600 to-indigo-600 text-white flex items-center justify-between">
-            <div className="flex items-center gap-2.5">
-              <div className="w-8 h-8 rounded-lg bg-white/20 flex items-center justify-center backdrop-blur-md">
-                <Sparkles className="w-4 h-4 text-amber-300" />
-              </div>
-              <div>
-                <h4 className="text-xs font-bold">Trip Planner Concierge</h4>
-                <p className="text-[10px] text-sky-100">Live AI Assistant for {generatedPlan.destination}</p>
-              </div>
-            </div>
-            <button
-              onClick={() => setChatOpen(false)}
-              className="text-white/80 hover:text-white text-xs font-bold px-2 py-1 rounded-lg hover:bg-white/10"
-            >
-              ✕
-            </button>
-          </div>
+        <GeminiChatbot
+          currentPlan={generatedPlan}
+          destinationName={destination}
+          isFloating={true}
+          isOpen={chatOpen}
+          onClose={() => setChatOpen(false)}
+        />
+      )}
 
-          {/* Quick Prompts */}
-          <div className="p-2.5 bg-slate-50 border-b border-slate-100 flex gap-1.5 overflow-x-auto text-[11px]">
-            <button
-              onClick={() => {
-                setChatInput('Recommend 3 authentic local dinner spots with outdoor seating.');
-              }}
-              className="px-2.5 py-1 rounded-full bg-white border border-slate-200 text-slate-700 hover:bg-sky-50 hover:text-sky-700 whitespace-nowrap cursor-pointer shrink-0"
-            >
-              🍽️ Local dinners
-            </button>
-            <button
-              onClick={() => {
-                setChatInput('What should I do if it rains on day 2?');
-              }}
-              className="px-2.5 py-1 rounded-full bg-white border border-slate-200 text-slate-700 hover:bg-sky-50 hover:text-sky-700 whitespace-nowrap cursor-pointer shrink-0"
-            >
-              🌧️ Rainy day options
-            </button>
-            <button
-              onClick={() => {
-                setChatInput('How do I easily get from the airport to the city center?');
-              }}
-              className="px-2.5 py-1 rounded-full bg-white border border-slate-200 text-slate-700 hover:bg-sky-50 hover:text-sky-700 whitespace-nowrap cursor-pointer shrink-0"
-            >
-              ✈️ Airport transit
-            </button>
-          </div>
-
-          {/* Messages list */}
-          <div className="flex-1 p-4 overflow-y-auto space-y-3 text-xs bg-slate-50/50">
-            {chatMessages.map((msg) => (
-              <div
-                key={msg.id}
-                className={`flex flex-col ${msg.sender === 'user' ? 'items-end' : 'items-start'}`}
-              >
-                <div
-                  className={`max-w-[85%] rounded-2xl px-3.5 py-2.5 leading-relaxed ${
-                    msg.sender === 'user'
-                      ? 'bg-sky-600 text-white rounded-br-xs'
-                      : 'bg-white text-slate-800 border border-slate-200 rounded-bl-xs shadow-2xs'
-                  }`}
-                >
-                  {msg.content}
+      {/* SAVED TRIPS MODAL (FIRESTORE INTEGRATION) */}
+      {showSavedTripsModal && (
+        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-xs z-50 flex items-center justify-center p-4 animate-in fade-in duration-150">
+          <div className="bg-white rounded-3xl shadow-2xl border border-slate-200 w-full max-w-2xl max-h-[85vh] flex flex-col overflow-hidden">
+            {/* Modal Header */}
+            <div className="p-5 sm:p-6 border-b border-slate-100 flex items-center justify-between bg-slate-50/70">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-2xl bg-rose-100 text-rose-600 flex items-center justify-center shadow-xs">
+                  <FolderHeart className="w-5 h-5" />
                 </div>
-                <span className="text-[9px] text-slate-400 mt-1 px-1">{msg.timestamp}</span>
+                <div>
+                  <h3 className="text-base font-extrabold text-slate-900 flex items-center gap-2">
+                    <span>My Saved Trips</span>
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">
+                      Firestore Cloud
+                    </span>
+                  </h3>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Your holiday itineraries synchronized with Firebase
+                  </p>
+                </div>
               </div>
-            ))}
-            {isChatSending && (
-              <div className="flex items-center gap-1.5 text-xs text-slate-400 p-2">
-                <span className="w-1.5 h-1.5 rounded-full bg-sky-600 animate-bounce"></span>
-                <span className="w-1.5 h-1.5 rounded-full bg-sky-600 animate-bounce [animation-delay:0.2s]"></span>
-                <span className="w-1.5 h-1.5 rounded-full bg-sky-600 animate-bounce [animation-delay:0.4s]"></span>
-                <span>Thinking...</span>
+
+              <button
+                onClick={() => setShowSavedTripsModal(false)}
+                className="p-2 rounded-xl text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors cursor-pointer"
+                title="Close"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Modal Content */}
+            <div className="p-5 sm:p-6 overflow-y-auto flex-1 space-y-4">
+              {!user ? (
+                <div className="text-center py-10 px-4 space-y-4 max-w-md mx-auto">
+                  <div className="w-14 h-14 rounded-2xl bg-sky-100 text-sky-600 flex items-center justify-center mx-auto">
+                    <Compass className="w-7 h-7" />
+                  </div>
+                  <div className="space-y-1.5">
+                    <h4 className="text-base font-bold text-slate-900">Sign in to view your saved trips</h4>
+                    <p className="text-xs text-slate-500 leading-relaxed">
+                      Connect your account with Google authentication to save your custom holiday plans and access
+                      them anytime from any device.
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => {
+                      setShowSavedTripsModal(false);
+                      onNavigate('auth');
+                    }}
+                    className="px-5 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs shadow-sm transition-all cursor-pointer inline-flex items-center gap-2"
+                  >
+                    <span>Go to Sign In</span>
+                    <ArrowRight className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              ) : isLoadingSavedTrips ? (
+                <div className="text-center py-16 space-y-3">
+                  <Loader2 className="w-8 h-8 animate-spin text-sky-600 mx-auto" />
+                  <p className="text-xs font-semibold text-slate-600">Retrieving itineraries from Firestore...</p>
+                </div>
+              ) : savedTrips.length === 0 ? (
+                <div className="text-center py-12 px-4 space-y-3">
+                  <div className="w-12 h-12 rounded-2xl bg-slate-100 text-slate-400 flex items-center justify-center mx-auto">
+                    <FolderHeart className="w-6 h-6" />
+                  </div>
+                  <h4 className="text-sm font-bold text-slate-800">No saved trips yet</h4>
+                  <p className="text-xs text-slate-500 max-w-sm mx-auto">
+                    Generate an itinerary using the AI planner above and click "Save Itinerary" to persist it directly
+                    into your Firebase cloud database.
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {savedTrips.map((trip) => (
+                    <div
+                      key={trip.id}
+                      className="p-4 rounded-2xl border border-slate-200 bg-white hover:border-slate-300 shadow-2xs transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-4"
+                    >
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <h4 className="text-sm font-bold text-slate-900">{trip.title}</h4>
+                          <span className="px-2 py-0.5 rounded-md text-[10px] font-semibold bg-sky-50 text-sky-700 capitalize">
+                            {trip.pacing}
+                          </span>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500">
+                          <span className="flex items-center gap-1">
+                            <MapPin className="w-3.5 h-3.5 text-slate-400" />
+                            {trip.destination}
+                          </span>
+                          <span>•</span>
+                          <span>
+                            {trip.durationDays} Days / {trip.travelers} Guest(s)
+                          </span>
+                          {trip.budget?.dailyAverage > 0 && (
+                            <>
+                              <span>•</span>
+                              <span className="text-emerald-700 font-medium">
+                                ~${trip.budget.dailyAverage}/day
+                              </span>
+                            </>
+                          )}
+                        </div>
+                        {trip.createdAt && (
+                          <p className="text-[10px] text-slate-400">
+                            Saved on {new Date(trip.createdAt).toLocaleDateString(undefined, {
+                              year: 'numeric',
+                              month: 'short',
+                              day: 'numeric',
+                            })}
+                          </p>
+                        )}
+                      </div>
+
+                      <div className="flex items-center gap-2 self-end sm:self-center shrink-0">
+                        <button
+                          onClick={() => handleSelectSavedTrip(trip)}
+                          className="px-3.5 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 text-white font-bold text-xs transition-colors cursor-pointer flex items-center gap-1.5 shadow-2xs"
+                        >
+                          <span>Load Plan</span>
+                          <ArrowRight className="w-3.5 h-3.5" />
+                        </button>
+
+                        <button
+                          onClick={() => handleDeleteSavedTrip(trip.id)}
+                          className="p-2 rounded-xl border border-slate-200 text-slate-400 hover:text-red-600 hover:border-red-200 hover:bg-red-50 transition-colors cursor-pointer"
+                          title="Delete from Firestore"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            {user && (
+              <div className="p-4 bg-slate-50 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
+                <span className="truncate max-w-[280px]">Signed in as: {user.email}</span>
+                <span className="font-semibold">{savedTrips.length} saved trip(s)</span>
               </div>
             )}
-            <div ref={chatBottomRef} />
           </div>
-
-          {/* Chat Input */}
-          <form onSubmit={handleSendChatMessage} className="p-3 bg-white border-t border-slate-200 flex items-center gap-2">
-            <input
-              type="text"
-              placeholder="Ask to adjust plans, sights, or meals..."
-              value={chatInput}
-              onChange={(e) => setChatInput(e.target.value)}
-              className="flex-1 px-3 py-2 text-xs rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500"
-            />
-            <button
-              type="submit"
-              disabled={isChatSending || !chatInput.trim()}
-              className="p-2 rounded-xl bg-sky-600 text-white hover:bg-sky-700 transition-colors disabled:opacity-40 cursor-pointer"
-            >
-              <Send className="w-4 h-4" />
-            </button>
-          </form>
         </div>
+      )}
+      {/* Google Calendar Sync Modal */}
+      {generatedPlan && (
+        <GoogleCalendarSyncModal
+          trip={generatedPlan}
+          isOpen={showCalendarModal}
+          onClose={() => setShowCalendarModal(false)}
+        />
       )}
     </div>
   );

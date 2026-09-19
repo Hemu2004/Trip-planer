@@ -1,0 +1,208 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated user profile data",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Firebase Auth UID of the user",
+          "maxLength": 128
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "User email address",
+          "maxLength": 256
+        },
+        "displayName": {
+          "type": "string",
+          "description": "User display name",
+          "maxLength": 200
+        },
+        "photoURL": {
+          "type": "string",
+          "description": "Avatar photo URL",
+          "maxLength": 2048
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "ISO timestamp of user profile creation",
+          "maxLength": 64
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "ISO timestamp of last update",
+          "maxLength": 64
+        }
+      },
+      "required": ["id", "email", "displayName", "createdAt"]
+    },
+    "TripPlanRecord": {
+      "title": "TripPlanRecord",
+      "description": "Saved travel itinerary and budget plan for a user",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique identifier of the trip plan",
+          "maxLength": 128
+        },
+        "userId": {
+          "type": "string",
+          "description": "UID of the trip owner",
+          "maxLength": 128
+        },
+        "title": {
+          "type": "string",
+          "description": "Title of the holiday plan",
+          "maxLength": 200
+        },
+        "destination": {
+          "type": "string",
+          "description": "Destination city and country",
+          "maxLength": 200
+        },
+        "startingLocation": {
+          "type": "string",
+          "description": "Departure city or airport",
+          "maxLength": 200
+        },
+        "startDate": {
+          "type": "string",
+          "description": "Trip start date (YYYY-MM-DD)",
+          "maxLength": 30
+        },
+        "endDate": {
+          "type": "string",
+          "description": "Trip end date (YYYY-MM-DD)",
+          "maxLength": 30
+        },
+        "durationDays": {
+          "type": "number",
+          "description": "Total duration in days"
+        },
+        "travelers": {
+          "type": "number",
+          "description": "Number of travelers in the party"
+        },
+        "pacing": {
+          "type": "string",
+          "description": "Pacing speed of the trip",
+          "enum": ["relaxed", "balanced", "packed"],
+          "maxLength": 20
+        },
+        "budgetTier": {
+          "type": "string",
+          "description": "Budget category",
+          "enum": ["budget", "moderate", "luxury", "custom"],
+          "maxLength": 20
+        },
+        "summary": {
+          "type": "string",
+          "description": "AI-generated overview of the trip experience",
+          "maxLength": 2000
+        },
+        "budget": {
+          "type": "object",
+          "description": "Financial estimates breakdown"
+        },
+        "suggestedPlaces": {
+          "type": "array",
+          "description": "List of recommended places to visit"
+        },
+        "suggestedActivities": {
+          "type": "array",
+          "description": "List of activities"
+        },
+        "itinerary": {
+          "type": "array",
+          "description": "Day-by-day itinerary schedule"
+        },
+        "travelTips": {
+          "type": "array",
+          "description": "Local tips and transit information"
+        },
+        "futureModules": {
+          "type": "object",
+          "description": "Stays and vehicle rental recommendations"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Creation timestamp",
+          "maxLength": 64
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "Last updated timestamp",
+          "maxLength": 64
+        }
+      },
+      "required": ["id", "userId", "title", "destination", "durationDays", "travelers", "createdAt"]
+    },
+    "ContactMessage": {
+      "title": "ContactMessage",
+      "description": "Inquiry or feedback submitted by users",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Message identifier",
+          "maxLength": 128
+        },
+        "name": {
+          "type": "string",
+          "description": "Sender full name",
+          "maxLength": 100
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Sender email",
+          "maxLength": 256
+        },
+        "subject": {
+          "type": "string",
+          "description": "Message subject",
+          "maxLength": 200
+        },
+        "message": {
+          "type": "string",
+          "description": "Message body content",
+          "maxLength": 4000
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Submission timestamp",
+          "maxLength": 64
+        },
+        "status": {
+          "type": "string",
+          "description": "Support message status (new, in_progress, resolved)",
+          "maxLength": 50
+        },
+        "recipient": {
+          "type": "string",
+          "description": "Internal recipient for support routing",
+          "maxLength": 256
+        }
+      },
+      "required": ["id", "name", "email", "message", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "Stores private profile and metadata for an authenticated traveler. Accessible by user and admin."
+    },
+    "/users/{userId}/trips/{tripId}": {
+      "schema": "TripPlanRecord",
+      "description": "Collection of saved itineraries owned by the user. Accessible by user and admin."
+    },
+    "/contactMessages/{messageId}": {
+      "schema": "ContactMessage",
+      "description": "Public support requests submitted to the administrator and support team. Readable and manageable by admin."
+    }
+  }
+}

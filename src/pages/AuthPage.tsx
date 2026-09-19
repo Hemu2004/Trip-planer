@@ -8,13 +8,14 @@ interface AuthPageProps {
 }
 
 export const AuthPage: React.FC<AuthPageProps> = ({ onNavigate }) => {
-  const { loginWithGoogle, loginWithEmail, isAuthenticated } = useAuth();
+  const { loginWithGoogle, loginWithEmail, loginAsDemo, isAuthenticated } = useAuth();
   const [authMode, setAuthMode] = useState<'signin' | 'signup'>('signin');
   const [emailInput, setEmailInput] = useState('');
   const [nameInput, setNameInput] = useState('');
   const [passwordInput, setPasswordInput] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+  const [showOauthGuide, setShowOauthGuide] = useState(false);
 
   // If already authenticated, allow instant navigation
   const handleProceedToPlanner = () => {
@@ -28,8 +29,28 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onNavigate }) => {
       await loginWithGoogle();
       // On success, redirect to main Trip Planner experience
       onNavigate('planner');
-    } catch (err) {
-      setErrorMsg('Google authentication failed. Please try again.');
+    } catch (err: any) {
+      if (err?.code === 'auth/popup-blocked') {
+        setErrorMsg('Pop-up was blocked by your browser. Please allow pop-ups for this site, or open the app in a new tab.');
+      } else if (err?.code === 'auth/popup-closed-by-user') {
+        setErrorMsg('Sign-in was cancelled before completing.');
+      } else {
+        setErrorMsg(err?.message || 'Google authentication failed. Check below for instant login options.');
+      }
+      setShowOauthGuide(true);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleDemoLogin = async (role: 'admin' | 'traveler') => {
+    try {
+      setIsSubmitting(true);
+      setErrorMsg('');
+      await loginAsDemo(role);
+      onNavigate(role === 'admin' ? 'admin' : 'planner');
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Failed to start demo session.');
     } finally {
       setIsSubmitting(false);
     }
@@ -45,10 +66,10 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onNavigate }) => {
     try {
       setIsSubmitting(true);
       setErrorMsg('');
-      await loginWithEmail(emailInput, nameInput);
+      await loginWithEmail(emailInput, nameInput, passwordInput, authMode === 'signup');
       onNavigate('planner');
-    } catch (err) {
-      setErrorMsg('Failed to sign in. Please check your credentials.');
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Failed to sign in. Please check your credentials.');
     } finally {
       setIsSubmitting(false);
     }
@@ -155,8 +176,17 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onNavigate }) => {
             </div>
 
             {errorMsg && (
-              <div className="p-3 rounded-xl bg-red-50 text-red-700 text-xs font-medium border border-red-100">
-                {errorMsg}
+              <div className="p-3.5 rounded-xl bg-red-50 text-red-700 text-xs font-medium border border-red-100 space-y-2">
+                <div>{errorMsg}</div>
+                {(errorMsg.includes('blocked') || errorMsg.includes('pop-up') || errorMsg.includes('Pop-up')) && (
+                  <button
+                    type="button"
+                    onClick={() => window.open(window.location.href, '_blank')}
+                    className="inline-flex items-center gap-1.5 font-bold text-sky-700 hover:text-sky-800 underline cursor-pointer pt-0.5"
+                  >
+                    <span>Open in new window to authenticate &rarr;</span>
+                  </button>
+                )}
               </div>
             )}
 
@@ -261,7 +291,67 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onNavigate }) => {
               </button>
             </form>
 
-            <div className="pt-2 text-center text-xs text-slate-500">
+            {/* 3. TERTIARY: Quick 1-Click Instant Demo Login (Bypasses Google OAuth verification roadblocks) */}
+            <div className="pt-2 border-t border-slate-100 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">
+                  Instant Access (No OAuth Needed)
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setShowOauthGuide(!showOauthGuide)}
+                  className="text-[11px] font-semibold text-sky-600 hover:text-sky-800 underline cursor-pointer"
+                >
+                  {showOauthGuide ? 'Hide OAuth Help' : 'OAuth Help & Fix'}
+                </button>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  id="auth-demo-traveler-btn"
+                  onClick={() => handleDemoLogin('traveler')}
+                  disabled={isSubmitting}
+                  className="py-2.5 px-3 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 text-xs font-semibold transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+                >
+                  <UserCheck className="w-3.5 h-3.5 text-sky-600" />
+                  <span>Traveler Demo</span>
+                </button>
+                <button
+                  type="button"
+                  id="auth-demo-admin-btn"
+                  onClick={() => handleDemoLogin('admin')}
+                  disabled={isSubmitting}
+                  className="py-2.5 px-3 rounded-xl border border-indigo-200 bg-indigo-50/60 hover:bg-indigo-100 text-indigo-900 text-xs font-semibold transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+                >
+                  <Shield className="w-3.5 h-3.5 text-indigo-600" />
+                  <span>Super Admin</span>
+                </button>
+              </div>
+
+              {/* Troubleshooting guide for Google Unverified App screen */}
+              {showOauthGuide && (
+                <div className="p-3.5 rounded-2xl bg-amber-50/80 border border-amber-200/80 text-[11px] text-amber-900 space-y-2">
+                  <div className="font-bold flex items-center gap-1.5 text-amber-800">
+                    <Sparkles className="w-3.5 h-3.5 text-amber-600" />
+                    <span>How to Bypass the Google OAuth Unverified App Screen:</span>
+                  </div>
+                  <ol className="list-decimal list-inside space-y-1.5 text-slate-700 pl-1 leading-relaxed">
+                    <li>
+                      <strong>In the Google popup:</strong> Click <em>"Advanced"</em> (or <em>"More options"</em>) at the bottom left, then click <em>"Go to molten-comfort-pf6jr.firebaseapp.com (unsafe)"</em> to proceed.
+                    </li>
+                    <li>
+                      <strong>In Google Cloud Console:</strong> Go to <em>APIs & Services &gt; OAuth consent screen</em>, and add your email (e.g. <code>hemanthkuamr17@gmail.com</code>) under <strong>Test Users</strong>.
+                    </li>
+                    <li>
+                      <strong>Instant bypass:</strong> Click the <strong>Traveler Demo</strong> or <strong>Super Admin</strong> button above to start exploring the trip planner immediately without OAuth restrictions!
+                    </li>
+                  </ol>
+                </div>
+              )}
+            </div>
+
+            <div className="pt-1 text-center text-xs text-slate-500">
               By proceeding, you agree to Trip Planner's Terms of Service and Privacy Policy.
             </div>
           </div>
