@@ -265,7 +265,13 @@ export interface RAGDocument {
     | 'transport_concepts'
     | 'cultural_info'
     | 'itinerary_principles'
-    | 'general_tips';
+    | 'general_tips'
+    | 'destinations'
+    | 'guidelines'
+    | 'tips'
+    | 'policies'
+    | 'general'
+    | string;
   content: string;
   tags: string[];
   source: string;
@@ -332,6 +338,8 @@ export interface ChatMessage {
   timestamp: string;
   role?: ChatbotRole;
   modelUsed?: string;
+  groundedInRAG?: boolean;
+  ragSourceTitle?: string;
   groundingSources?: GroundingSource[];
   groundingSearchQueries?: string[];
   suggestedAction?: {
@@ -339,6 +347,15 @@ export interface ChatMessage {
     label: string;
     payload?: any;
   };
+}
+
+export interface ChatConversation {
+  id: string;
+  userId: string;
+  title: string;
+  messages: ChatMessage[];
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface ContactFormData {

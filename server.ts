@@ -13,6 +13,7 @@ import {
 } from './src/data/travelKnowledgeBase';
 import { POPULAR_DESTINATIONS } from './src/data/sampleDestinations';
 import { RAGDocument, MapLocationItem } from './src/types';
+import { DEFAULT_KNOWLEDGE_FILES } from './src/utils/knowledgeBaseStorage';
 
 dotenv.config();
 
@@ -39,7 +40,29 @@ function getGeminiClient(): GoogleGenAI | null {
 }
 
 // In-memory mutable RAG knowledge store for Admin management
-let mutableRAGStore: RAGDocument[] = [...RAG_KNOWLEDGE_STORE];
+const defaultDocsFromFiles: RAGDocument[] = DEFAULT_KNOWLEDGE_FILES.map((f) => ({
+  id: f.id,
+  title: f.name.replace(/\.[^/.]+$/, '').replace(/_/g, ' '),
+  destination: f.tags?.find((t) => ['Japan', 'Kyoto', 'Amalfi', 'Italy', 'Paris', 'France'].includes(t)) || 'Global',
+  category: f.category || 'guidelines',
+  content: f.contentSnippet,
+  tags: f.tags || [],
+  source: `Admin Knowledge Base (${f.fileType.toUpperCase()})`,
+  lastIndexed: f.lastProcessedAt ? f.lastProcessedAt.split('T')[0] : '2026-09-17',
+}));
+
+let mutableRAGStore: RAGDocument[] = [...RAG_KNOWLEDGE_STORE, ...defaultDocsFromFiles];
+
+// User Chat Conversation store (strictly isolated by userId for privacy)
+interface SavedConversation {
+  id: string;
+  userId: string;
+  title: string;
+  messages: any[];
+  createdAt: string;
+  updatedAt: string;
+}
+const userConversationsStore: Map<string, SavedConversation[]> = new Map();
 
 // Health Check
 app.get('/api/health', (req: Request, res: Response) => {
@@ -678,20 +701,22 @@ app.get('/api/rag/documents', (req: Request, res: Response) => {
   res.json({ documents: results, total: results.length });
 });
 
-// POST /api/rag/documents - Admin add travel knowledge document
+// POST /api/rag/documents - Admin add travel knowledge document (PDF, DOCX, TXT, etc.)
 app.post('/api/rag/documents', requireSuperAdmin, (req: Request, res: Response) => {
-  const { title, destination = 'Global', category = 'destination_guide', content, tags = [] } = req.body;
+  const { title, name, destination = 'Global', category = 'guidelines', content, contentSnippet, tags = [] } = req.body;
+  const docTitle = title || name;
+  const docContent = content || contentSnippet;
 
-  if (!title || !content) {
-    return res.status(400).json({ error: 'Title and content are required.' });
+  if (!docTitle || !docContent) {
+    return res.status(400).json({ error: 'Title/name and content are required.' });
   }
 
   const newDoc: RAGDocument = {
-    id: 'rag-' + Date.now(),
-    title,
+    id: req.body.id || ('rag-' + Date.now()),
+    title: docTitle,
     destination,
     category,
-    content,
+    content: docContent,
     tags: Array.isArray(tags) ? tags : [tags],
     source: 'Admin Verified Knowledge Portal',
     lastIndexed: new Date().toISOString().split('T')[0],
@@ -699,6 +724,59 @@ app.post('/api/rag/documents', requireSuperAdmin, (req: Request, res: Response) 
 
   mutableRAGStore.unshift(newDoc);
   res.json({ success: true, document: newDoc });
+});
+
+// GET /api/trip/conversations - Retrieve private conversations for authenticated user
+app.get('/api/trip/conversations', (req: Request, res: Response) => {
+  const userId = ((req.headers['x-user-id'] || req.headers['x-user-email'] || req.query.userId) as string || '').toLowerCase().trim();
+  if (!userId) {
+    return res.json({ conversations: [] });
+  }
+  const userConvs = userConversationsStore.get(userId) || [];
+  res.json({ conversations: userConvs });
+});
+
+// POST /api/trip/conversations - Save or update conversation for authenticated user
+app.post('/api/trip/conversations', (req: Request, res: Response) => {
+  const { conversation, userId } = req.body;
+  const effectiveUserId = (userId || (req.headers['x-user-id'] as string) || '').toLowerCase().trim();
+
+  if (!effectiveUserId || !conversation || !conversation.id) {
+    return res.status(400).json({ error: 'Valid userId and conversation are required.' });
+  }
+
+  const userConvs = userConversationsStore.get(effectiveUserId) || [];
+  const existingIdx = userConvs.findIndex((c) => c.id === conversation.id);
+  const updatedConv = {
+    ...conversation,
+    userId: effectiveUserId,
+    updatedAt: new Date().toISOString(),
+  };
+
+  if (existingIdx >= 0) {
+    userConvs[existingIdx] = updatedConv;
+  } else {
+    userConvs.unshift(updatedConv);
+  }
+
+  userConversationsStore.set(effectiveUserId, userConvs);
+  res.json({ success: true, conversation: updatedConv });
+});
+
+// DELETE /api/trip/conversations/:id - Delete conversation for authenticated user
+app.delete('/api/trip/conversations/:id', (req: Request, res: Response) => {
+  const { id } = req.params;
+  const effectiveUserId = ((req.headers['x-user-id'] || req.query.userId) as string || '').toLowerCase().trim();
+
+  if (!effectiveUserId) {
+    return res.status(400).json({ error: 'User ID is required.' });
+  }
+
+  const userConvs = userConversationsStore.get(effectiveUserId) || [];
+  const filtered = userConvs.filter((c) => c.id !== id);
+  userConversationsStore.set(effectiveUserId, filtered);
+
+  res.json({ success: true, message: 'Conversation deleted.' });
 });
 
 // POST /api/rag/reindex - Trigger RAG index refresh
@@ -1223,12 +1301,108 @@ Format the output strictly according to the provided JSON schema. Ensure real ne
   }
 });
 
-// Helper: Intelligent local concierge response generator for offline / quota-limited scenarios
+interface RetrievedRAGChunk {
+  documentId: string;
+  title: string;
+  source: string;
+  destination: string;
+  category: string;
+  chunkContent: string;
+  score: number;
+}
+
+// Dynamic RAG Search over mutable Admin-managed knowledge store
+function searchRAGKnowledgeStore(query: string, currentDestination: string = ''): RetrievedRAGChunk[] {
+  const cleanQuery = query.toLowerCase().trim();
+  const stopWords = new Set([
+    'what', 'is', 'are', 'the', 'a', 'an', 'and', 'or', 'in', 'on', 'at', 'to', 'for',
+    'of', 'with', 'about', 'can', 'you', 'tell', 'me', 'how', 'do', 'i', 'my', 'your',
+    'please', 'give', 'recommend', 'show'
+  ]);
+  const queryTokens = cleanQuery
+    .replace(/[^\w\s]/g, ' ')
+    .split(/\s+/)
+    .filter((t) => t.length > 2 && !stopWords.has(t));
+
+  const scoredDocs: RetrievedRAGChunk[] = [];
+
+  for (const doc of mutableRAGStore) {
+    let score = 0;
+    const titleLower = doc.title.toLowerCase();
+    const contentLower = doc.content.toLowerCase();
+    const destLower = doc.destination.toLowerCase();
+    const tagsLower = doc.tags.map((t) => t.toLowerCase());
+
+    // Destination match bonus
+    if (currentDestination && destLower.includes(currentDestination.toLowerCase().split(',')[0].trim())) {
+      score += 6;
+    }
+    if (cleanQuery.includes(destLower) || (destLower !== 'global' && queryTokens.some((t) => destLower.includes(t)))) {
+      score += 8;
+    }
+
+    // Exact title phrases or token matches
+    for (const token of queryTokens) {
+      if (titleLower.includes(token)) score += 5;
+      if (tagsLower.some((t) => t.includes(token))) score += 4;
+      if (contentLower.includes(token)) score += 2;
+    }
+
+    // High confidence threshold for RAG retrieval
+    if (score >= 6) {
+      let snippet = doc.content;
+      if (snippet.length > 650) {
+        const sentences = doc.content.split(/(?<=[.?!])\s+/);
+        const scoredSentences = sentences.map((s) => {
+          let sScore = 0;
+          const sLower = s.toLowerCase();
+          for (const token of queryTokens) {
+            if (sLower.includes(token)) sScore += 2;
+          }
+          return { sentence: s, sScore };
+        });
+        scoredSentences.sort((a, b) => b.sScore - a.sScore);
+        const topSentences = scoredSentences.slice(0, 3).map((item) => item.sentence);
+        snippet = topSentences.join(' ');
+        if (snippet.length < 200) {
+          snippet = doc.content.slice(0, 500);
+        }
+      }
+
+      scoredDocs.push({
+        documentId: doc.id,
+        title: doc.title,
+        source: doc.source || 'Admin Knowledge Base',
+        destination: doc.destination,
+        category: doc.category,
+        chunkContent: snippet,
+        score,
+      });
+    }
+  }
+
+  scoredDocs.sort((a, b) => b.score - a.score);
+  return scoredDocs.slice(0, 2); // Take top 2 most relevant chunks only
+}
+
+// Helper: Intelligent Trip Planner AI response generator for offline / quota-limited scenarios
 function getIntelligentTravelReply(
   message: string,
   currentPlan: any,
-  role: string
-): { reply: string; sources: Array<{ title: string; url: string }> } {
+  role: string,
+  matchedRAG: RetrievedRAGChunk[] = []
+): { reply: string; sources: Array<{ title: string; url: string }>; groundedInRAG: boolean; ragSourceTitle?: string } {
+  if (matchedRAG.length > 0) {
+    const top = matchedRAG[0];
+    const reply = `Based on Trip Planner Knowledge Base (${top.title}):\n\n${top.chunkContent}\n\nI can help you incorporate this into your trip plan, adjust daily pacing, or manage your travel budget!`;
+    return {
+      reply,
+      sources: [{ title: `Trip Planner Knowledge Base: ${top.title}`, url: '#' }],
+      groundedInRAG: true,
+      ragSourceTitle: `Based on Trip Planner Knowledge Base • ${top.title}`,
+    };
+  }
+
   const lower = message.toLowerCase();
   const destination = currentPlan?.destination || 'your destination';
   let reply = '';
@@ -1236,60 +1410,29 @@ function getIntelligentTravelReply(
 
   const searchBase = 'https://www.google.com/search?q=';
 
-  if (lower.includes('hour') || lower.includes('open') || lower.includes('ticket') || lower.includes('fee') || lower.includes('admission') || lower.includes('time')) {
-    reply = `For top sights and temples in ${destination}, major attractions typically open between 8:30 AM and 9:00 AM and close around 5:00 PM or sunset. It's strongly recommended to pre-book timed-entry tickets online 3-7 days in advance to bypass long ticket queues during morning rush hours.`;
-    sources = [
-      { title: `${destination} Attraction Hours & Booking`, url: `${searchBase}${encodeURIComponent(destination + ' top attractions opening hours tickets')}` },
-      { title: `${destination} Visitor Guide`, url: `${searchBase}${encodeURIComponent(destination + ' tourism official guide')}` },
-    ];
-  } else if (lower.includes('food') || lower.includes('restaurant') || lower.includes('eat') || lower.includes('dinner') || lower.includes('lunch') || lower.includes('bistro') || lower.includes('cafe')) {
-    reply = `In ${destination}, venture 2-3 blocks off the main tourist avenues into local neighborhood laneways. Look for lively bistros with chalkboard menus in the local language where residents dine around 1:00 PM (lunch) or 8:00 PM (dinner). Don't hesitate to ask for the "chef's daily market special"!`;
-    sources = [
-      { title: `${destination} Authentic Dining & Cafes`, url: `${searchBase}${encodeURIComponent('best authentic restaurants in ' + destination)}` },
-      { title: 'Local Food Specialties', url: `${searchBase}${encodeURIComponent('must try food in ' + destination)}` },
-    ];
-  } else if (lower.includes('rain') || lower.includes('weather') || lower.includes('indoor') || lower.includes('storm')) {
-    reply = `If rain is forecasted in ${destination}, pivot outdoor stops to historic covered arcades, national art museums, heritage tea houses, or an artisanal cooking class. Many landmark museums offer extended evening hours and warm cafe lounges.`;
-    sources = [
-      { title: 'Indoor & Rainy Day Activities', url: `${searchBase}${encodeURIComponent('rainy day things to do in ' + destination)}` },
-    ];
-  } else if (lower.includes('transit') || lower.includes('airport') || lower.includes('train') || lower.includes('subway') || lower.includes('bus') || lower.includes('taxi')) {
-    reply = `For smooth transit in ${destination}: 1) Buy a reloadable contactless transit card or multi-day pass directly at the airport arrivals terminal; 2) For airport transfers, express trains or official metered airport taxi ranks are significantly safer and cheaper than unlicensed touts.`;
-    sources = [
-      { title: `${destination} Public Transit & Airport Guide`, url: `${searchBase}${encodeURIComponent(destination + ' airport to city center transit')}` },
-    ];
-  } else if (lower.includes('budget') || lower.includes('cheap') || lower.includes('save') || lower.includes('cost') || lower.includes('price')) {
-    reply = `To stretch your budget in ${destination}: 1) Make lunch your main sit-down meal, as many top restaurants offer fixed-price midday menus at 30-40% below dinner prices; 2) Bundle sights with a city museum pass; 3) Use local buses/metro rather than taxis for trips between districts.`;
-    sources = [
-      { title: 'Budget Travel Tips', url: `${searchBase}${encodeURIComponent('budget travel guide ' + destination)}` },
-    ];
-  } else if (lower.includes('etiquette') || lower.includes('scam') || lower.includes('tip') || lower.includes('safety') || lower.includes('custom')) {
-    reply = `Key cultural & safety tips for ${destination}: 1) Always carry small local cash notes for markets and street stalls; 2) Check local tipping etiquette (often 5-10% or rounding up, unlike standard US tipping); 3) Stay vigilant around crowded transit hubs against pickpockets and polite diversion scams.`;
-    sources = [
-      { title: 'Safety & Etiquette Advice', url: `${searchBase}${encodeURIComponent(destination + ' travel safety etiquette tipping')}` },
-    ];
-  } else if (lower.includes('day 1') || lower.includes('day 2') || lower.includes('day 3') || lower.includes('day 4') || lower.includes('itinerary')) {
-    reply = `For your schedule in ${destination}, ensure morning activities are clustered in the same geographic quadrant to minimize transit fatigue. Reserve the 12:30 PM - 2:30 PM window for a relaxed sit-down meal out of the midday sun, followed by scenic walking or sunset viewpoints in late afternoon.`;
-    sources = [
-      { title: `${destination} Day-by-Day Route Planner`, url: `${searchBase}${encodeURIComponent(destination + ' travel itinerary tips')}` },
-    ];
+  if (lower.includes('plan a trip') || lower.includes('plan a 5-day') || lower.includes('5-day') || lower.includes('itinerary')) {
+    reply = `Here is a curated 5-day trip blueprint for ${destination}:\n\n• Day 1: Arrival, gentle neighborhood orientation, and a scenic welcome sunset dinner.\n• Day 2: Signature landmark sights and historical cultural walking tour in the morning.\n• Day 3: Coastal excursion, beach leisure, and seaside seafood dinner.\n• Day 4: Local artisan markets, culinary tasting tour, and scenic evening viewpoint.\n• Day 5: Relaxed brunch, souvenir shopping, and departure transfer.\n\nWould you like me to adapt this specifically to your pace or budget?`;
+    sources = [{ title: `${destination} Itinerary Guide`, url: `${searchBase}${encodeURIComponent(destination + ' 5 day itinerary')}` }];
+  } else if (lower.includes('beach') || lower.includes('coastal')) {
+    reply = `Top beach and coastal recommendations:\n1. Choose beaches with calm swimming lagoons in the morning before trade winds pick up.\n2. Pack reef-safe mineral sunscreen (oxybenzone-free) and a dry bag for catamaran cruises.\n3. Beach club loungers usually require booking 1-2 days ahead during prime sunny weekends.`;
+    sources = [{ title: 'Beach Vacation Tips', url: `${searchBase}${encodeURIComponent(destination + ' top beaches')}` }];
+  } else if (lower.includes('budget') || lower.includes('cost') || lower.includes('save') || lower.includes('cheap')) {
+    reply = `To manage your travel budget effectively in ${destination}:\n1. Allocate ~40% for accommodation, 30% for food & dining, 20% for experiences & entrance tickets, and 10% for local transit & contingency.\n2. Opt for set midday lunch menus at top bistros for 30-40% savings compared to dinner.\n3. Bundle museum admissions with a regional city card and use local metros/trains.`;
+    sources = [{ title: 'Travel Budget Planning', url: `${searchBase}${encodeURIComponent(destination + ' budget planning tips')}` }];
+  } else if (lower.includes('family') || lower.includes('kid')) {
+    reply = `Family vacation advice for ${destination}:\n• Keep schedules to 1 anchor activity per day to avoid travel fatigue.\n• Book private vehicle transfers with verified child safety seats rather than navigating crowded buses with strollers.\n• Choose accommodations with kitchenettes and pool facilities for afternoon recharge breaks.`;
+    sources = [{ title: 'Family Travel Guide', url: `${searchBase}${encodeURIComponent(destination + ' family vacation tips')}` }];
+  } else if (lower.includes('policy') || lower.includes('insurance') || lower.includes('rule') || lower.includes('guideline')) {
+    reply = `I couldn't find enough information about that in my travel knowledge base. I can still help if you provide more details, or assist with planning your itinerary, destinations, and budget.`;
   } else {
-    if (role === 'local_advisor') {
-      reply = `Quick local tip for ${destination}: Start major sightseeing before 10:00 AM to beat tour buses, keep offline map coordinates saved on your phone, and always carry a reusable water bottle and small local cash. What else can I check for you?`;
-    } else if (role === 'master_architect') {
-      reply = `Logistics recommendation for ${destination}: Group your activities by neighborhood to avoid crisscrossing town. Leave at least a 90-minute buffer between afternoon sightseeing and dinner reservations for rest and freshening up.`;
-    } else {
-      reply = `I would be delighted to help adjust your holiday in ${destination}! Whether you need authentic restaurant suggestions, live transit options, or outdoor activity pivots, let me know which part of your itinerary you would like to explore.`;
-    }
-    sources = [
-      { title: `${destination} Travel Overview`, url: `${searchBase}${encodeURIComponent(destination + ' travel highlights')}` },
-    ];
+    reply = `I am your Trip Planner AI! I can help you discover destinations, plan trips, create itineraries, manage budgets, find places, and answer travel questions for ${destination}. What would you like to explore next?`;
+    sources = [{ title: `${destination} Travel Overview`, url: `${searchBase}${encodeURIComponent(destination + ' travel highlights')}` }];
   }
 
-  return { reply, sources };
+  return { reply, sources, groundedInRAG: false };
 }
 
-// Conversational Refinement & AI Concierge Endpoint
+// Conversational Trip Planner AI Endpoint (Connected to RAG + Live Data)
 app.post('/api/trip/chat', async (req: Request, res: Response) => {
   const {
     currentPlan,
@@ -1304,10 +1447,38 @@ app.post('/api/trip/chat', async (req: Request, res: Response) => {
   }
 
   const ai = getGeminiClient();
+  const destination = currentPlan?.destination || '';
 
-  // Model selection:
-  // Using gemini-3.8-flash for general tasks & Search Grounding, and gemini-3.1-flash-lite for fast tasks.
-  // We avoid models requiring paid billing (like gemini-3.1-pro-preview) to prevent 429 quota exhaustion.
+  // 1. Dynamic RAG Search over shared Admin-managed Knowledge Base
+  const matchedRAG = searchRAGKnowledgeStore(message, destination);
+  const groundedInRAG = matchedRAG.length > 0;
+  const ragSourceTitle = groundedInRAG
+    ? `Based on Trip Planner Knowledge Base`
+    : undefined;
+
+  // 2. Fetch Live Travel Data if applicable
+  let liveDataSnippets = '';
+  if (destination) {
+    try {
+      const lower = message.toLowerCase();
+      if (lower.includes('weather') || lower.includes('rain') || lower.includes('temp') || lower.includes('forecast') || lower.includes('pack')) {
+        const weather = getLiveWeatherForDestination(destination);
+        if (weather) {
+          liveDataSnippets += `\n[VERIFIED LIVE WEATHER FEED for ${destination}]: ${weather.temperatureC}°C (${weather.temperatureF}°F), ${weather.condition}, Precipitation probability: ${weather.precipitationChance}%, Best season: ${weather.bestSeason}.${weather.advisory ? ` Advisory: ${weather.advisory}` : ''}`;
+        }
+      }
+      if (lower.includes('currency') || lower.includes('rate') || lower.includes('exchange') || lower.includes('cost') || lower.includes('budget')) {
+        const rates = getExchangeRates('USD');
+        if (Array.isArray(rates) && rates.length > 0) {
+          const ratesSummary = rates.map((r) => `1 ${r.base} = ${r.rate} ${r.target}`).join(', ');
+          liveDataSnippets += `\n[VERIFIED LIVE EXCHANGE RATES]: ${ratesSummary}`;
+        }
+      }
+    } catch (e) {
+      console.warn('Live data fetch notice:', e);
+    }
+  }
+
   let targetModel = 'gemini-3.8-flash';
   if (role === 'local_advisor') {
     targetModel = 'gemini-3.1-flash-lite';
@@ -1315,68 +1486,51 @@ app.post('/api/trip/chat', async (req: Request, res: Response) => {
     targetModel = 'gemini-3.8-flash';
   }
 
-  // Define role-specific system instructions
-  let roleSystemInstruction = '';
-  if (role === 'local_advisor') {
-    roleSystemInstruction = `You are "Local Flash Advisor", an ultra-responsive, street-savvy travel companion for ${
-      currentPlan?.destination || 'the traveler'
-    }.
-Your role is to provide quick, punchy, high-speed insights.
-Tone: Warm, direct, practical, enthusiastic.
-Guidelines:
-- Keep responses compact, crisp, and under 90 words.
-- Focus on local transit hacks, neighborhood slang, tipping etiquette, safety tips, best takeaway snacks, or quick translations.
-- Highlight 1-2 immediate tips the traveler can use right now.`;
-  } else if (role === 'master_architect') {
-    roleSystemInstruction = `You are "Master Itinerary Architect", a senior travel logistics specialist and luxury tour curator for ${
-      currentPlan?.destination || 'the vacation'
-    }.
-Your role is to solve complex pacing, logistical trade-offs, multi-day sequencing, and budget allocation.
-Active Trip Details:
-- Destination: ${currentPlan?.destination || 'Not specified'}
-- Summary: ${currentPlan?.summary || 'Standard holiday'}
+  // Define Travel Assistant system instructions
+  let roleSystemInstruction = `You are "Trip Planner AI", an expert, welcoming, and helpful travel assistant built directly into the Trip Planner application.
+Your mission is to help travelers discover destinations, plan trips, create itineraries, manage budgets, find places, and answer travel questions (destinations, beaches, hotels, places to visit, activities, restaurants, transportation, trip planning, itineraries, budgets, travel tips, packing, and travel preparation).
+
+Active Trip Context:
+- Current Destination: ${destination || 'Global travel planning'}
+- Trip Summary: ${currentPlan?.summary || currentPlan?.title || 'Open travel consultation'}
 - Duration: ${currentPlan?.durationDays || 4} days
 - Budget Tier: ${currentPlan?.budgetTier || 'moderate'} (Target: $${currentPlan?.budget?.totalEstimated || 1200})
 - Pacing: ${currentPlan?.pacing || 'balanced'}
-Guidelines:
-- Provide structured, strategic advice (e.g. chronological day suggestions, morning vs evening trade-offs).
-- Calculate estimated cost adjustments if the user proposes changes.
-- Ensure travelers do not suffer from travel fatigue by preventing backtracking across town.`;
-  } else {
-    // Default: 'concierge'
-    roleSystemInstruction = `You are "Trip Planner AI Concierge", an upscale, knowledgeable holiday curator.
-You help travelers discover unforgettable vacations, hidden gems, beachfront spots, culinary highlights, and accurate local information for ${
-      currentPlan?.destination || 'their holiday'
-    }.
-Active Trip Context:
-- Destination: ${currentPlan?.destination || 'Global vacation'}
-- Duration: ${currentPlan?.durationDays || 4} days
-- Budget Tier: ${currentPlan?.budgetTier || 'moderate'}
-- Current Itinerary Theme: ${currentPlan?.title || 'Bespoke Vacation'}
-Guidelines:
-- Tone: Inspiring, cultured, hospitable, and precise.
-- Use up-to-date travel facts, verified opening hours, seasonal advice, and cultural respect.
-- Offer actionable next steps (e.g., "Would you like me to replace Day 2 afternoon with this beach club?").`;
-  }
 
-  // Retrieve Admin-managed RAG knowledge relevant to user query and destination
-  const matchedRAG = retrieveRAGKnowledge(message, currentPlan?.destination || '');
+GROUNDING & TRAVEL RULES:
+1. TRIP PLANNER KNOWLEDGE BASE:
+When verified knowledge chunks from the Trip Planner Knowledge Base are provided below, prioritize them and ground your response in this verified information.
+2. MISSING KNOWLEDGE:
+If the user asks a specific question about internal guidelines, local policies, documents, or niche rules where relevant information was NOT found in the knowledge base, respond naturally:
+"I couldn't find enough information about that in my travel knowledge base. I can still help if you provide more details, or I can help you plan your destinations, itineraries, and budget."
+3. TRAVEL ASSISTANT CAPABILITIES:
+When asked travel planning questions (e.g. "Plan a trip for me", "Find beach destinations", "Create a 5-day itinerary", "Help me plan my budget", "Suggest places to visit", "Help me plan a family vacation"), respond with a clear, structured, inspiring, and practical travel plan.
+4. LIVE TRAVEL DATA:
+When live travel data (such as live weather or exchange rates) is provided below, incorporate it accurately. Never fabricate live data or pretend unavailable APIs are connected.
+5. TRIP PLANNER ACTIONS:
+If the user asks to modify their current trip (e.g. "Add a beach to Day 3"), specify the exact modification so the traveler can easily apply it.`;
+
   if (matchedRAG.length > 0) {
     const ragSnippets = matchedRAG
-      .slice(0, 3)
-      .map((d) => `[Verified Admin Knowledge: ${d.title} (${d.category})]\n${d.content}`)
+      .map((d) => `[Trip Planner Knowledge Base: ${d.title} (${d.category} - ${d.destination})]\n${d.chunkContent}`)
       .join('\n\n');
-    roleSystemInstruction += `\n\nADMIN-MANAGED RAG KNOWLEDGE REPOSITORY (Prioritize these verified travel guidelines and facts for the traveler):\n${ragSnippets}`;
+    roleSystemInstruction += `\n\nVERIFIED TRIP PLANNER KNOWLEDGE BASE CHUNKS:\n${ragSnippets}`;
+  }
+
+  if (liveDataSnippets) {
+    roleSystemInstruction += `\n\nLIVE TRAVEL DATA:\n${liveDataSnippets}`;
   }
 
   // If no Gemini client is configured, provide curated local intelligence
   if (!ai) {
-    const { reply, sources } = getIntelligentTravelReply(message, currentPlan, role);
+    const fallback = getIntelligentTravelReply(message, currentPlan, role, matchedRAG);
     return res.json({
-      reply,
+      reply: fallback.reply,
       role,
       modelUsed: targetModel + ' (local-curated)',
-      groundingSources: sources,
+      groundedInRAG: fallback.groundedInRAG,
+      ragSourceTitle: fallback.ragSourceTitle,
+      groundingSources: fallback.sources,
       groundingSearchQueries: [message],
       source: 'curated-fallback',
     });
@@ -1435,9 +1589,12 @@ Guidelines:
       reply: replyText,
       role,
       modelUsed: targetModel,
+      groundedInRAG,
+      ragSourceTitle,
       groundedWithGoogleSearch: enableSearch && groundingSources.length > 0,
       groundingSources,
       groundingSearchQueries,
+      liveDataAttached: !!liveDataSnippets,
       source: 'gemini',
     });
   } catch (err: any) {
@@ -1453,14 +1610,16 @@ Guidelines:
       console.warn('[Gemini Chat Notice] Fallback triggered:', err?.message || err);
     }
 
-    // High quality graceful fallback response
-    const { reply, sources } = getIntelligentTravelReply(message, currentPlan, role);
+    // High quality graceful fallback response with RAG grounding
+    const fallbackResult = getIntelligentTravelReply(message, currentPlan, role, matchedRAG);
 
     return res.json({
-      reply,
+      reply: fallbackResult.reply,
       role,
       modelUsed: targetModel + ' (curated-fallback)',
-      groundingSources: sources,
+      groundedInRAG: fallbackResult.groundedInRAG,
+      ragSourceTitle: fallbackResult.ragSourceTitle,
+      groundingSources: fallbackResult.sources,
       groundingSearchQueries: [message],
       source: 'curated-fallback',
       notice: isQuota ? 'Serving curated travel advice while API quota resets.' : undefined,
