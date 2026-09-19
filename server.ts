@@ -828,6 +828,113 @@ app.post('/api/rag/documents/:id/reprocess', requireSuperAdmin, (req: Request, r
 });
 
 // ==========================================
+// 2B. RAG RETRIEVAL PIPELINE
+// ==========================================
+
+export interface RetrievedRAGChunk {
+  documentId: string;
+  title: string;
+  source: string;
+  destination: string;
+  category: string;
+  chunkContent: string;
+  score: number;
+}
+
+// Dynamic RAG Search over mutable Admin-managed knowledge store
+export function searchRAGKnowledgeStore(query: string, currentDestination: string = ''): RetrievedRAGChunk[] {
+  const cleanQuery = (query || '').toLowerCase().trim();
+  const stopWords = new Set([
+    'what', 'is', 'are', 'the', 'a', 'an', 'and', 'or', 'in', 'on', 'at', 'to', 'for',
+    'of', 'with', 'about', 'can', 'you', 'tell', 'me', 'how', 'do', 'i', 'my', 'your',
+    'please', 'give', 'recommend', 'show'
+  ]);
+  const queryTokens = cleanQuery
+    .replace(/[^\w\s]/g, ' ')
+    .split(/\s+/)
+    .filter((t) => t.length > 2 && !stopWords.has(t));
+
+  const scoredDocs: RetrievedRAGChunk[] = [];
+
+  for (const doc of mutableRAGStore) {
+    let score = 0;
+    const titleLower = doc.title.toLowerCase();
+    const contentLower = doc.content.toLowerCase();
+    const destLower = doc.destination.toLowerCase();
+    const tagsLower = doc.tags.map((t) => t.toLowerCase());
+
+    // Destination match bonus
+    if (currentDestination && destLower.includes(currentDestination.toLowerCase().split(',')[0].trim())) {
+      score += 6;
+    }
+    if (cleanQuery.includes(destLower) || (destLower !== 'global' && queryTokens.some((t) => destLower.includes(t)))) {
+      score += 8;
+    }
+
+    // Exact title phrases or token matches
+    for (const token of queryTokens) {
+      if (titleLower.includes(token)) score += 5;
+      if (tagsLower.some((t) => t.includes(token))) score += 4;
+      if (contentLower.includes(token)) score += 2;
+    }
+
+    // High confidence threshold for RAG retrieval
+    if (score >= 5) {
+      let snippet = doc.content;
+      if (snippet.length > 650) {
+        const sentences = doc.content.split(/(?<=[.?!])\s+/);
+        const scoredSentences = sentences.map((s) => {
+          let sScore = 0;
+          const sLower = s.toLowerCase();
+          for (const token of queryTokens) {
+            if (sLower.includes(token)) sScore += 2;
+          }
+          return { sentence: s, sScore };
+        });
+        scoredSentences.sort((a, b) => b.sScore - a.sScore);
+        const topSentences = scoredSentences.slice(0, 3).map((item) => item.sentence);
+        snippet = topSentences.join(' ');
+        if (snippet.length < 200) {
+          snippet = doc.content.slice(0, 500);
+        }
+      }
+
+      scoredDocs.push({
+        documentId: doc.id,
+        title: doc.title,
+        source: doc.source || 'Admin Knowledge Base',
+        destination: doc.destination,
+        category: doc.category,
+        chunkContent: snippet,
+        score,
+      });
+    }
+  }
+
+  scoredDocs.sort((a, b) => b.score - a.score);
+  return scoredDocs.slice(0, 3); // Take top 3 most relevant chunks
+}
+
+// GET or POST /api/rag/search - Query RAG pipeline directly
+app.all('/api/rag/search', (req: Request, res: Response) => {
+  const query = (req.method === 'POST' ? req.body.query : req.query.query || req.query.q) as string || '';
+  const destination = (req.method === 'POST' ? req.body.destination : req.query.destination || req.query.dest) as string || '';
+  
+  if (!query && !destination) {
+    return res.status(400).json({ error: 'Query or destination is required for RAG search.' });
+  }
+
+  const chunks = searchRAGKnowledgeStore(query, destination);
+  res.json({
+    query,
+    destination,
+    chunks,
+    totalRetrieved: chunks.length,
+    groundedInRAG: chunks.length > 0,
+  });
+});
+
+// ==========================================
 // 3. AI PLAN GENERATOR (RAG + Live Data + Gemini)
 // ==========================================
 
@@ -1058,10 +1165,12 @@ app.post('/api/trip/generate', async (req: Request, res: Response) => {
 
   try {
     // 1. Retrieve RAG Travel Knowledge
-    const ragContextDocs = retrieveRAGKnowledge(interests.join(' ') + ' ' + (specialRequests || ''), destination);
-    const ragKnowledgeSnippet = ragContextDocs
-      .map((d) => `[Source: ${d.title} (${d.category})]\n${d.content}`)
-      .join('\n\n');
+    const retrievedRAG = searchRAGKnowledgeStore(interests.join(' ') + ' ' + (specialRequests || ''), destination);
+    const ragKnowledgeSnippet = retrievedRAG.length > 0
+      ? retrievedRAG.map((d) => `[Source: ${d.title} (${d.category} - ${d.destination})]\n${d.chunkContent}`).join('\n\n')
+      : retrieveRAGKnowledge(interests.join(' ') + ' ' + (specialRequests || ''), destination)
+          .map((d) => `[Source: ${d.title} (${d.category})]\n${d.content}`)
+          .join('\n\n');
 
     // 2. Retrieve Live Weather & Rates
     const liveWeather = getLiveWeatherForDestination(destination);
@@ -1300,90 +1409,6 @@ Format the output strictly according to the provided JSON schema. Ensure real ne
     });
   }
 });
-
-interface RetrievedRAGChunk {
-  documentId: string;
-  title: string;
-  source: string;
-  destination: string;
-  category: string;
-  chunkContent: string;
-  score: number;
-}
-
-// Dynamic RAG Search over mutable Admin-managed knowledge store
-function searchRAGKnowledgeStore(query: string, currentDestination: string = ''): RetrievedRAGChunk[] {
-  const cleanQuery = query.toLowerCase().trim();
-  const stopWords = new Set([
-    'what', 'is', 'are', 'the', 'a', 'an', 'and', 'or', 'in', 'on', 'at', 'to', 'for',
-    'of', 'with', 'about', 'can', 'you', 'tell', 'me', 'how', 'do', 'i', 'my', 'your',
-    'please', 'give', 'recommend', 'show'
-  ]);
-  const queryTokens = cleanQuery
-    .replace(/[^\w\s]/g, ' ')
-    .split(/\s+/)
-    .filter((t) => t.length > 2 && !stopWords.has(t));
-
-  const scoredDocs: RetrievedRAGChunk[] = [];
-
-  for (const doc of mutableRAGStore) {
-    let score = 0;
-    const titleLower = doc.title.toLowerCase();
-    const contentLower = doc.content.toLowerCase();
-    const destLower = doc.destination.toLowerCase();
-    const tagsLower = doc.tags.map((t) => t.toLowerCase());
-
-    // Destination match bonus
-    if (currentDestination && destLower.includes(currentDestination.toLowerCase().split(',')[0].trim())) {
-      score += 6;
-    }
-    if (cleanQuery.includes(destLower) || (destLower !== 'global' && queryTokens.some((t) => destLower.includes(t)))) {
-      score += 8;
-    }
-
-    // Exact title phrases or token matches
-    for (const token of queryTokens) {
-      if (titleLower.includes(token)) score += 5;
-      if (tagsLower.some((t) => t.includes(token))) score += 4;
-      if (contentLower.includes(token)) score += 2;
-    }
-
-    // High confidence threshold for RAG retrieval
-    if (score >= 6) {
-      let snippet = doc.content;
-      if (snippet.length > 650) {
-        const sentences = doc.content.split(/(?<=[.?!])\s+/);
-        const scoredSentences = sentences.map((s) => {
-          let sScore = 0;
-          const sLower = s.toLowerCase();
-          for (const token of queryTokens) {
-            if (sLower.includes(token)) sScore += 2;
-          }
-          return { sentence: s, sScore };
-        });
-        scoredSentences.sort((a, b) => b.sScore - a.sScore);
-        const topSentences = scoredSentences.slice(0, 3).map((item) => item.sentence);
-        snippet = topSentences.join(' ');
-        if (snippet.length < 200) {
-          snippet = doc.content.slice(0, 500);
-        }
-      }
-
-      scoredDocs.push({
-        documentId: doc.id,
-        title: doc.title,
-        source: doc.source || 'Admin Knowledge Base',
-        destination: doc.destination,
-        category: doc.category,
-        chunkContent: snippet,
-        score,
-      });
-    }
-  }
-
-  scoredDocs.sort((a, b) => b.score - a.score);
-  return scoredDocs.slice(0, 2); // Take top 2 most relevant chunks only
-}
 
 // Helper: Intelligent Trip Planner AI response generator for offline / quota-limited scenarios
 function getIntelligentTravelReply(
